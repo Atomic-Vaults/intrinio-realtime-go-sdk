@@ -198,7 +198,7 @@ func (client *Client) getToken() string {
 	return client.token
 }
 
-func (client *Client) initWebSocket(token string) {
+func (client *Client) initWebSocket(token string) bool {
 	log.Println("Client - Connecting...")
 	wsUrl := client.config.getWSUrl(token)
 	wsHeader := map[string][]string{"UseNewEquitiesFormat": {"v2"}, "Client-Information": {"IntrinioRealtimeOptionsGoSDKv3.1"}}
@@ -209,7 +209,7 @@ func (client *Client) initWebSocket(token string) {
 	conn, resp, dialErr := dialer.Dial(wsUrl, wsHeader)
 	if dialErr != nil {
 		log.Printf("Client - Connection failure: %v\n", dialErr)
-		return
+		return false
 	}
 	log.Printf("Client - Status: %s\n", resp.Status)
 	client.wsConn = conn
@@ -218,6 +218,7 @@ func (client *Client) initWebSocket(token string) {
 		client.heartbeat = time.NewTicker(20 * time.Second)
 	}
 	client.isClosed = false
+	return true
 }
 
 func (client *Client) tryResetWebSocket() bool {
@@ -336,8 +337,18 @@ func (client *Client) read() {
 
 func (client *Client) Start() {
 	client.isStopped = false
-	token := client.getToken()
-	client.initWebSocket(token)
+	// Keep dialing until connected: read() and write() need a connection, and reading from a client that never
+	// connected dereferences a nil one in its own goroutine, which no caller can recover and crashes the process.
+	doBackoff(func() bool {
+		if client.initWebSocket(client.getToken()) {
+			return true
+		}
+		client.tokenUpdateTime = time.Time{} // the token may have been rejected, authorize again before the next dial
+		return false
+	}, &client.isStopped)
+	if client.isStopped { // stopped before it connected
+		return
+	}
 	for w := 0; w < client.workerCount; w++ {
 		client.closeWg.Add(1)
 		go client.work()
