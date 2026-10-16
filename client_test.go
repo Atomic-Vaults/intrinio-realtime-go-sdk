@@ -74,9 +74,9 @@ func (s *fakeServer) connectedHeaders() []http.Header {
 
 func withoutBackoff(t *testing.T) {
 	t.Helper()
-	original := selfHealBackoffs
-	selfHealBackoffs = [5]int{}
-	t.Cleanup(func() { selfHealBackoffs = original })
+	originalBackoffs, originalDelay := selfHealBackoffs, reconnectDelay
+	selfHealBackoffs, reconnectDelay = [5]int{}, 0
+	t.Cleanup(func() { selfHealBackoffs, reconnectDelay = originalBackoffs, originalDelay })
 }
 
 func waitFor(t *testing.T, what string, cond func() bool) {
@@ -141,6 +141,36 @@ func TestStartReturnsWhenStoppedBeforeConnecting(t *testing.T) {
 	case <-time.After(5 * time.Second):
 		t.Fatal("Start did not return after Stop")
 	}
+}
+
+func TestReconnectRejoinsWithTheInitialHeaders(t *testing.T) {
+	withoutBackoff(t)
+	s := newFakeServer(t)
+	client := NewEquitiesClient(s.config(), nil, func(EquityQuote) {})
+	client.Start()
+	client.JoinMany([]string{"AMD"})
+	receiveJoin(t, s)
+
+	// drop the connection: read() fails and the client reconnects, its first attempt rejected
+	s.rejectDials.Store(1)
+	client.wsConn.Close()
+	if symbol := receiveJoin(t, s); symbol != "AMD" {
+		t.Fatalf("rejoined %q, want AMD", symbol)
+	}
+	// a rejected dial may be a rejected token, so the retry authorized again
+	if tokens := s.tokens.Load(); tokens != 2 {
+		t.Fatalf("tokens = %d, want 2", tokens)
+	}
+	headers := s.connectedHeaders()
+	if len(headers) != 2 {
+		t.Fatalf("connections = %d, want 2", len(headers))
+	}
+	for _, name := range []string{"UseNewEquitiesFormat", "Client-Information"} {
+		if initial, reconnected := headers[0].Get(name), headers[1].Get(name); initial == "" || initial != reconnected {
+			t.Errorf("%s header: initial %q, reconnected %q", name, initial, reconnected)
+		}
+	}
+	client.Stop()
 }
 
 // Unsynchronized, the subscriptions map made the runtime abort with "concurrent map read and map write". The client's

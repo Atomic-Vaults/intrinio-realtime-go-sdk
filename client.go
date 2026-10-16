@@ -14,6 +14,8 @@ import (
 
 var selfHealBackoffs [5]int = [5]int{10, 30, 60, 300, 600}
 
+var reconnectDelay = 10 * time.Second
+
 const (
 	HEARTBEAT_INTERVAL       int = 20
 	MAX_OPTIONS_QUEUE_DEPTH  int = 20000
@@ -199,15 +201,19 @@ func (client *Client) getToken() string {
 	return client.token
 }
 
+// wsHeader selects the message format the parsers expect, on the first connection and every reconnection alike
+func wsHeader() map[string][]string {
+	return map[string][]string{"UseNewEquitiesFormat": {"v2"}, "Client-Information": {"IntrinioRealtimeOptionsGoSDKv3.1"}}
+}
+
 func (client *Client) initWebSocket(token string) bool {
 	log.Println("Client - Connecting...")
 	wsUrl := client.config.getWSUrl(token)
-	wsHeader := map[string][]string{"UseNewEquitiesFormat": {"v2"}, "Client-Information": {"IntrinioRealtimeOptionsGoSDKv3.1"}}
 	dialer := websocket.Dialer{
 		ReadBufferSize:  10240,
 		WriteBufferSize: 128,
 	}
-	conn, resp, dialErr := dialer.Dial(wsUrl, wsHeader)
+	conn, resp, dialErr := dialer.Dial(wsUrl, wsHeader())
 	if dialErr != nil {
 		log.Printf("Client - Connection failure: %v\n", dialErr)
 		return false
@@ -224,13 +230,13 @@ func (client *Client) initWebSocket(token string) bool {
 
 func (client *Client) tryResetWebSocket() bool {
 	wsUrl := client.config.getWSUrl(client.token)
-	wsHeader := map[string][]string{"UseNewEquitiesFormat": {"true"}}
 	dialer := websocket.Dialer{
 		ReadBufferSize:  10240,
 		WriteBufferSize: 128,
 	}
-	conn, resp, dialErr := dialer.Dial(wsUrl, wsHeader)
+	conn, resp, dialErr := dialer.Dial(wsUrl, wsHeader())
 	if dialErr != nil {
+		log.Printf("Client - Reconnection failure: %v\n", dialErr)
 		return false
 	}
 	log.Printf("Client - Status: %s\n", resp.Status)
@@ -248,18 +254,17 @@ func (client *Client) tryResetWebSocket() bool {
 
 func (client *Client) reconnect() {
 	client.wsConn.Close()
-	time.Sleep(10 * time.Second)
+	time.Sleep(reconnectDelay)
 	doBackoff(func() bool {
 		log.Println("Client - Reconnecting...")
-		if time.Since(client.tokenUpdateTime) < (24 * time.Hour) {
-			return client.tryResetWebSocket()
-		} else {
-			if client.trySetToken() {
-				return client.tryResetWebSocket()
-			} else {
-				return false
-			}
+		if time.Since(client.tokenUpdateTime) >= (24*time.Hour) && !client.trySetToken() {
+			return false
 		}
+		if client.tryResetWebSocket() {
+			return true
+		}
+		client.tokenUpdateTime = time.Time{} // the token may have been rejected, authorize again before the next dial
+		return false
 	}, &client.isStopped)
 }
 
