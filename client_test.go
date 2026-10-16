@@ -142,3 +142,43 @@ func TestStartReturnsWhenStoppedBeforeConnecting(t *testing.T) {
 		t.Fatal("Start did not return after Stop")
 	}
 }
+
+// Unsynchronized, the subscriptions map made the runtime abort with "concurrent map read and map write". The client's
+// isClosed and wsConn fields are still shared without synchronization, so -race reports those, not the map.
+func TestSubscriptionsAreSafeForConcurrentUse(t *testing.T) {
+	withoutBackoff(t)
+	s := newFakeServer(t)
+	client := NewEquitiesClient(s.config(), nil, func(EquityQuote) {})
+	client.Start()
+	go func() { // keep draining joins so the writer never backs up
+		for range s.joins {
+		}
+	}()
+
+	// the caller joins and leaves while a reconnect rejoins the subscriptions
+	var wg sync.WaitGroup
+	for g := 0; g < 4; g++ {
+		wg.Add(1)
+		go func(g int) {
+			defer wg.Done()
+			for i := 0; i < 200; i++ {
+				symbol := fmt.Sprintf("S%d_%d", g, i)
+				client.JoinMany([]string{symbol, symbol + "X"})
+				client.Join(symbol + "Y")
+				client.Leave(symbol)
+				if i%50 == 0 {
+					client.LeaveAll()
+				}
+			}
+		}(g)
+	}
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		for i := 0; i < 20; i++ {
+			go func() { <-client.reconnected }()
+			client.tryResetWebSocket()
+		}
+	}()
+	wg.Wait()
+}

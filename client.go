@@ -48,6 +48,7 @@ type Client struct {
 	txtMsgCount     uint32
 	workerCount     int
 	subscriptions   map[string]bool
+	subscriptionsMu sync.Mutex // shared by the caller's joins and leaves and the reconnect's rejoin
 	isStopped       bool
 	isClosed        bool
 	closeWg         sync.WaitGroup
@@ -235,9 +236,11 @@ func (client *Client) tryResetWebSocket() bool {
 	log.Printf("Client - Status: %s\n", resp.Status)
 	client.wsConn = conn
 	log.Printf("Client - Rejoining")
+	client.subscriptionsMu.Lock()
 	for key := range client.subscriptions {
 		client.writeChannel <- client.composeJoinMsg(key)
 	}
+	client.subscriptionsMu.Unlock()
 	client.reconnected <- true
 	client.isClosed = false
 	return true
@@ -363,6 +366,8 @@ func (client *Client) Join(symbol string) {
 		for client.isClosed {
 			time.Sleep(time.Second)
 		}
+		client.subscriptionsMu.Lock()
+		defer client.subscriptionsMu.Unlock()
 		if !client.subscriptions[symbol] {
 			client.subscriptions[symbol] = true
 			client.writeChannel <- client.composeJoinMsg(symbol)
@@ -374,6 +379,8 @@ func (client *Client) JoinMany(symbols []string) {
 	for client.isClosed {
 		time.Sleep(time.Second)
 	}
+	client.subscriptionsMu.Lock()
+	defer client.subscriptionsMu.Unlock()
 	for i := 0; i < len(symbols); i++ {
 		s := strings.TrimSpace(symbols[i])
 		if s != "" && !client.subscriptions[symbols[i]] {
@@ -387,6 +394,8 @@ func (client *Client) JoinLobby() {
 	for client.isClosed {
 		time.Sleep(time.Second)
 	}
+	client.subscriptionsMu.Lock()
+	defer client.subscriptionsMu.Unlock()
 	if !client.subscriptions["$FIREHOSE"] {
 		client.subscriptions["$FIREHOSE"] = true
 		client.writeChannel <- client.composeJoinMsg("$FIREHOSE")
@@ -396,6 +405,8 @@ func (client *Client) JoinLobby() {
 }
 
 func (client *Client) LeaveAll() {
+	client.subscriptionsMu.Lock()
+	defer client.subscriptionsMu.Unlock()
 	for key := range client.subscriptions {
 		client.writeChannel <- client.composeLeaveMsg(key)
 		delete(client.subscriptions, key)
@@ -405,6 +416,8 @@ func (client *Client) LeaveAll() {
 func (client *Client) Leave(symbol string) {
 	s := strings.TrimSpace(symbol)
 	if s != "" {
+		client.subscriptionsMu.Lock()
+		defer client.subscriptionsMu.Unlock()
 		if client.subscriptions[symbol] {
 			client.writeChannel <- client.composeLeaveMsg(symbol)
 			delete(client.subscriptions, symbol)
@@ -419,6 +432,8 @@ func (client *Client) LeaveMany(symbols []string) {
 }
 
 func (client *Client) LeaveLobby(composeLeave func(string)) {
+	client.subscriptionsMu.Lock()
+	defer client.subscriptionsMu.Unlock()
 	if client.subscriptions["$FIREHOSE"] {
 		client.writeChannel <- client.composeLeaveMsg("$FIREHOSE")
 		delete(client.subscriptions, "$FIREHOSE")
