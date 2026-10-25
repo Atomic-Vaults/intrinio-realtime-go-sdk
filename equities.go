@@ -86,36 +86,43 @@ func parseEquityQuote(bytes []byte) EquityQuote {
 	}
 }
 
+// workOnEquities handles one websocket message. A malformed message is logged and dropped instead of panicking a worker,
+// which would crash the process.
 func workOnEquities(
-	readChannel <-chan []byte,
+	data []byte,
 	onTrade func(EquityTrade),
 	onQuote func(EquityQuote)) {
-	select {
-	case data := <-readChannel:
-		count := data[0]
-		startIndex := 1
-		for i := 0; i < int(count); i++ {
-			msgType := data[startIndex]
-			if (msgType == 1) || (msgType == 2) {
-				//endIndex := int(data[startIndex+1])
-				endIndex := startIndex + int(data[startIndex+1])
-				quote := parseEquityQuote(data[startIndex:endIndex])
-				startIndex = endIndex
-				if onQuote != nil {
-					onQuote(quote)
-				}
-			} else if msgType == 0 {
-				endIndex := startIndex + int(data[startIndex+1])
-				trade := parseEquityTrade(data[startIndex:endIndex])
-				startIndex = endIndex
-				if onTrade != nil {
-					onTrade(trade)
-				}
-			} else {
-				log.Printf("Equity Client - Invalid message type: %d", msgType)
-			}
+	defer func() {
+		if r := recover(); r != nil {
+			log.Printf("Equity Client - Dropped a message that could not be handled: %v", r)
 		}
-	default:
+	}()
+	if len(data) == 0 {
+		return
+	}
+	data = data[:len(data):len(data)] // reading past a message's declared length must fail rather than read garbage
+	count := data[0]
+	startIndex := 1
+	for i := 0; i < int(count); i++ {
+		msgType := data[startIndex]
+		if (msgType == 1) || (msgType == 2) {
+			//endIndex := int(data[startIndex+1])
+			endIndex := startIndex + int(data[startIndex+1])
+			quote := parseEquityQuote(data[startIndex:endIndex:endIndex])
+			startIndex = endIndex
+			if onQuote != nil {
+				onQuote(quote)
+			}
+		} else if msgType == 0 {
+			endIndex := startIndex + int(data[startIndex+1])
+			trade := parseEquityTrade(data[startIndex:endIndex:endIndex])
+			startIndex = endIndex
+			if onTrade != nil {
+				onTrade(trade)
+			}
+		} else {
+			log.Printf("Equity Client - Invalid message type: %d", msgType)
+		}
 	}
 }
 
